@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import 'main.dart';
+import 'search.dart';
 
 const repo = 'yoyo-ui/cambridge-offline';
 const packsSql = 'CREATE TABLE packs(lang TEXT PRIMARY KEY, n INTEGER, audio INTEGER)';
@@ -101,6 +102,7 @@ Future<void> autoSync() async {
   for (final r in rows) {
     await runPack(r['lang'] as String, r['n'] as int, r['audio'] == 1);
   }
+  await loadVocab();
 }
 
 Future<void> checkUpdate({bool manual = false}) async {
@@ -164,6 +166,7 @@ Future<void> checkUpdate({bool manual = false}) async {
 }
 
 void startServices() {
+  loadVocab();
   Future.delayed(const Duration(seconds: 3), () {
     checkUpdate();
     autoSync();
