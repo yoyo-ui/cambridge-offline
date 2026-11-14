@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -13,12 +14,14 @@ import 'main.dart';
 import 'search.dart';
 
 const repo = 'yoyo-ui/cambridge-offline';
+const missingSql = 'CREATE TABLE missing(key TEXT PRIMARY KEY, ts INTEGER)';
 const packsSql = 'CREATE TABLE packs(lang TEXT PRIMARY KEY, n INTEGER, audio INTEGER)';
 final navKey = GlobalKey<NavigatorState>();
 
 class Pack extends ChangeNotifier {
   int done = 0, total = 0;
   bool running = false, stop = false;
+  String err = '';
   void ping() => notifyListeners();
 }
 
@@ -27,55 +30,103 @@ final packs = {for (final k in langs.keys) k: Pack()};
 Future<bool> offline() async => (await Connectivity().checkConnectivity()).contains(ConnectivityResult.none);
 
 Future<List<String>> wordList({bool refresh = false}) async {
-  final f = File(p.join((await getApplicationDocumentsDirectory()).path, 'words.txt'));
+  final dir = (await getApplicationDocumentsDirectory()).path;
+  final f = File(p.join(dir, 'words.txt'));
+  final tag = File(p.join(dir, 'words.etag'));
   if (refresh || !f.existsSync()) {
     try {
-      final r = await http.get(Uri.parse('https://raw.githubusercontent.com/$repo/main/words.txt')).timeout(const Duration(seconds: 20));
-      if (r.statusCode == 200 && r.bodyBytes.length > 100) await f.writeAsBytes(r.bodyBytes);
+      final r = await http.get(Uri.parse('https://raw.githubusercontent.com/$repo/main/words.txt'), headers: {
+        if (f.existsSync() && tag.existsSync()) 'If-None-Match': tag.readAsStringSync(),
+      }).timeout(const Duration(seconds: 40));
+      if (r.statusCode == 200 && r.bodyBytes.length > 100) {
+        await f.writeAsBytes(r.bodyBytes);
+        final t = r.headers['etag'];
+        if (t != null) await tag.writeAsString(t);
+      }
     } catch (_) {}
   }
   if (!f.existsSync()) return [];
-  return f.readAsLinesSync().map((e) => e.trim().toLowerCase()).where((e) => e.isNotEmpty).toList();
+  return f.readAsLinesSync().map((x) => x.trim().toLowerCase()).where((x) => x.isNotEmpty).toList();
 }
 
-Future<void> runPack(String lg, int n, bool audio, {bool refresh = false}) async {
+const _ch = MethodChannel('cambridge/dl');
+Future<void> svc(String m, [String text = '']) async {
+  try {
+    await _ch.invokeMethod(m, {'text': text});
+  } catch (_) {}
+}
+
+int _active = 0;
+
+Future<void> runPack(String lg, int n, bool audio) async {
   final pk = packs[lg]!;
   if (pk.running) return;
   pk.running = true;
   pk.stop = false;
   pk.done = 0;
   pk.total = 0;
+  pk.err = '';
   pk.ping();
+  if (_active++ == 0) await svc('start', 'بنحمّل القواميس...');
   try {
-    final words = (await wordList(refresh: refresh)).take(n).toList();
-    final have = (await db.query('words', columns: ['word'], where: 'lang=?', whereArgs: [lg])).map((e) => e['word'] as String).toSet();
-    final todo = words.where((w) => !have.contains(w)).toList();
+    final words = (await wordList(refresh: true)).take(n).toList();
+    final have = (await db.query('words', columns: ['word'], where: 'lang=?', whereArgs: [lg])).map((x) => x['word'] as String).toSet();
+    final cut = DateTime.now().subtract(const Duration(days: 30)).millisecondsSinceEpoch;
+    final miss = (await db.query('missing', columns: ['key'], where: 'ts>?', whereArgs: [cut])).map((x) => x['key'] as String).toSet();
+    final todo = words.where((w) => !have.contains(w) && !miss.contains('$lg:$w')).toList();
     pk.total = todo.length;
     pk.ping();
     await db.insert('packs', {'lang': lg, 'n': n, 'audio': audio ? 1 : 0}, conflictAlgorithm: ConflictAlgorithm.replace);
-    var i = 0;
+    var i = 0, fails = 0;
     Future<void> worker() async {
       while (!pk.stop && i < todo.length) {
         final w = todo[i++];
-        try {
-          final r = await http.get(Uri.parse('$api/$lg/${Uri.encodeComponent(w)}')).timeout(const Duration(seconds: 20));
-          final j = jsonDecode(utf8.decode(r.bodyBytes));
-          if (r.statusCode == 200 && j is Map && j['word'] != null) {
-            await db.insert('words', {'key': '$lg:$w', 'word': w, 'lang': lg, 'json': jsonEncode(j), 'ts': 0, 'fav': 0, 'seen': 0},
-                conflictAlgorithm: ConflictAlgorithm.ignore);
-            if (audio) await saveAudio(j);
+        var ok = false;
+        for (var a = 0; a < 3 && !pk.stop; a++) {
+          try {
+            final r = await http.get(Uri.parse('$api/$lg/${Uri.encodeComponent(w)}')).timeout(const Duration(seconds: 25));
+            if (r.statusCode == 429 || r.statusCode >= 500) throw Exception('busy');
+            dynamic j;
+            try {
+              j = jsonDecode(utf8.decode(r.bodyBytes));
+            } catch (_) {}
+            final now = DateTime.now().millisecondsSinceEpoch;
+            if (r.statusCode == 200 && j is Map && j['word'] != null) {
+              await db.insert('words', {'key': '$lg:$w', 'word': w, 'lang': lg, 'json': enc(j), 'ts': 0, 'fav': 0, 'seen': 0},
+                  conflictAlgorithm: ConflictAlgorithm.ignore);
+              addVocab(w);
+              if (audio) await saveAudio(j);
+            } else {
+              await db.insert('missing', {'key': '$lg:$w', 'ts': now}, conflictAlgorithm: ConflictAlgorithm.replace);
+            }
+            ok = true;
+            fails = 0;
+            break;
+          } catch (_) {
+            if (await offline()) {
+              pk.err = 'مفيش نت، هنكمّل لما يرجع';
+              pk.stop = true;
+            } else {
+              await Future.delayed(Duration(seconds: 2 + a * 3));
+            }
           }
-        } catch (_) {
-          if (await offline()) pk.stop = true;
+        }
+        if (!ok && !pk.stop && ++fails >= 6) {
+          pk.err = 'السيرفر مش بيرد، هنكمّل بعدين';
+          pk.stop = true;
         }
         pk.done++;
-        if (pk.done % 5 == 0) pk.ping();
+        if (pk.done % 20 == 0) {
+          pk.ping();
+          svc('update', '${langs[lg]}: ${pk.done} / ${pk.total}');
+        }
       }
     }
 
     await Future.wait([worker(), worker(), worker()]);
   } catch (_) {}
   pk.running = false;
+  if (--_active == 0) await svc('stop');
   pk.ping();
 }
 
@@ -83,6 +134,7 @@ Future<void> deletePack(String lg) async {
   packs[lg]!.stop = true;
   await db.delete('words', where: 'lang=? AND seen=0 AND fav=0', whereArgs: [lg]);
   await db.delete('packs', where: 'lang=?', whereArgs: [lg]);
+  await db.delete('missing', where: 'key LIKE ?', whereArgs: ['$lg:%']);
   for (final f in audioDir.listSync()) {
     try {
       f.deleteSync();
@@ -218,7 +270,7 @@ class _DlState extends State<DownloadsPage> {
               for (final e in langs.entries) _card(e.key, e.value, st[e.key] ?? [0, 0], t),
               const Padding(
                 padding: EdgeInsets.all(8),
-                child: Text('الأب بيدوّر على كلمات جديدة للقواميس المحمّلة كل ما يلاقي نت، والتحميل بيكمّل لوحده من حيث وقف. لازم الأب يكون مفتوح.'),
+                child: Text('التحميل بيكمّل والأب في الخلفية (بإشعار فوق). لو قفلته من الريسنت بيقف ويكمّل لوحده لما تفتحه. "الكل" ممكن ياخد ساعات ومساحة كبيرة، فحمّل على قد احتياجك.'),
               ),
             ]);
           },
@@ -240,6 +292,7 @@ class _DlState extends State<DownloadsPage> {
             }),
           ]),
           Text('${st[0]} كلمة محفوظة · ${mb(st[1])}'),
+          if (pk.err.isNotEmpty) Text(pk.err, style: const TextStyle(color: orange)),
           if (pk.running) ...[
             const SizedBox(height: 8),
             LinearProgressIndicator(value: pk.total == 0 ? null : pk.done / pk.total),
@@ -247,8 +300,8 @@ class _DlState extends State<DownloadsPage> {
             TextButton(onPressed: () => pk.stop = true, child: const Text('إيقاف مؤقت')),
           ] else
             Wrap(spacing: 8, children: [
-              for (final n in [1000, 3000, 5000, 100000])
-                OutlinedButton(onPressed: () => runPack(lg, n, audio), child: Text(n > 5000 ? 'الكل' : '$n كلمة')),
+              for (final n in [1000, 5000, 20000, 50000, 1000000])
+                OutlinedButton(onPressed: () => runPack(lg, n, audio), child: Text(n >= 1000000 ? 'الكل (177 ألف)' : '$n')),
             ]),
         ]),
       ),

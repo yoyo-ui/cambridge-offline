@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,22 +23,27 @@ late Directory audioDir;
 final player = AudioPlayer();
 final lang = ValueNotifier<String>('en');
 String s(Object? o) => o?.toString() ?? '';
+Uint8List enc(Object j) => Uint8List.fromList(gzip.encode(utf8.encode(jsonEncode(j))));
+Map<String, dynamic> dec(Object v) =>
+    Map<String, dynamic>.from(jsonDecode(v is String ? v : utf8.decode(gzip.decode(v as List<int>))));
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dir = await getApplicationDocumentsDirectory();
   audioDir = Directory(p.join(dir.path, 'audio'))..createSync(recursive: true);
-  db = await openDatabase(p.join(dir.path, 'dict.db'), version: 2,
+  db = await openDatabase(p.join(dir.path, 'dict.db'), version: 3,
       onCreate: (d, _) async {
         await d.execute(
             'CREATE TABLE words(key TEXT PRIMARY KEY, word TEXT, lang TEXT, json TEXT, ts INTEGER, fav INTEGER DEFAULT 0, seen INTEGER DEFAULT 1)');
         await d.execute(packsSql);
+        await d.execute(missingSql);
       },
       onUpgrade: (d, o, _) async {
         if (o < 2) {
           await d.execute('ALTER TABLE words ADD COLUMN seen INTEGER DEFAULT 1');
           await d.execute(packsSql);
         }
+        if (o < 3) await d.execute(missingSql);
       });
   runApp(const App());
   startServices();
@@ -58,13 +64,13 @@ Future<Entry?> lookup(String lg, String q) async {
   final rows = await db.query('words', where: 'key=?', whereArgs: [key]);
   if (rows.isNotEmpty) {
     await db.update('words', {'ts': now, 'seen': 1}, where: 'key=?', whereArgs: [key]);
-    return Entry(Map<String, dynamic>.from(jsonDecode(rows.first['json'] as String)), key, rows.first['fav'] == 1);
+    return Entry(dec(rows.first['json'] as Object), key, rows.first['fav'] == 1);
   }
   try {
     final r = await http.get(Uri.parse('$api/$lg/${Uri.encodeComponent(w.replaceAll(' ', '-'))}')).timeout(const Duration(seconds: 15));
     final j = jsonDecode(utf8.decode(r.bodyBytes));
     if (r.statusCode == 200 && j is Map && j['word'] != null) {
-      await db.insert('words', {'key': key, 'word': w, 'lang': lg, 'json': jsonEncode(j), 'ts': now, 'fav': 0, 'seen': 1});
+      await db.insert('words', {'key': key, 'word': w, 'lang': lg, 'json': enc(j), 'ts': now, 'fav': 0, 'seen': 1});
       addVocab(w);
       saveAudio(j);
       return Entry(Map<String, dynamic>.from(j), key, false);

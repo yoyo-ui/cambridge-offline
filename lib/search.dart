@@ -50,7 +50,8 @@ Future<List<String>> smartSuggest(String q, {int limit = 8, bool self = false}) 
   if (out.length < limit && w.length >= 3) {
     final max = w.length <= 3 ? 1 : 2;
     final keys = <int>[];
-    for (var i = 0; i < vocab.length; i++) {
+    final lim = vocab.length < 30000 ? vocab.length : 30000;
+    for (var i = 0; i < lim; i++) {
       final x = vocab[i];
       if (x == w || (x.length - w.length).abs() > max) continue;
       final dd = dist(w, x);

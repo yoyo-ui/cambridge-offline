@@ -20,11 +20,20 @@ jobs:
           cache: true
       - name: Generate Android scaffold
         run: |
-          cp -r lib /tmp/lib && cp pubspec.yaml /tmp/pubspec.yaml
+          cp -r lib /tmp/lib && cp pubspec.yaml /tmp/pubspec.yaml && cp -r android_extra /tmp/android_extra
           flutter create --platforms=android --project-name cambridge_offline --org com.meda .
           cp -r /tmp/lib/. lib/ && cp /tmp/pubspec.yaml pubspec.yaml
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>\n    <application#' android/app/src/main/AndroidManifest.xml
-          sed -i 's#android:label="[^"]*"#android:label="Cambridge Offline"#' android/app/src/main/AndroidManifest.xml
+          D=$(dirname "$(find android/app/src/main -name MainActivity.kt | head -1)")
+          cp /tmp/android_extra/*.kt "$D/"
+          M=android/app/src/main/AndroidManifest.xml
+          P=""
+          for x in INTERNET REQUEST_INSTALL_PACKAGES FOREGROUND_SERVICE FOREGROUND_SERVICE_DATA_SYNC POST_NOTIFICATIONS WAKE_LOCK REQUEST_IGNORE_BATTERY_OPTIMIZATIONS; do
+            P="$P<uses-permission android:name=\"android.permission.$x\"/>\n    "
+          done
+          sed -i "s#<application#${P}<application#" $M
+          sed -i 's#</application>#<service android:name=".DownloadService" android:foregroundServiceType="dataSync" android:exported="false"/>\n    </application>#' $M
+          sed -i 's#android:label="[^"]*"#android:label="Cambridge Offline"#' $M
+          cat $M
       - name: Restore signing key
         run: |
           mkdir -p ~/.android
