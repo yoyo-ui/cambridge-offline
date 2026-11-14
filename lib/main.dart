@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -219,7 +220,7 @@ class _SearchState extends State<SearchPage> {
     final cs = Theme.of(context).colorScheme;
     final t = Theme.of(context).textTheme;
     final top = MediaQuery.of(context).padding.top;
-    return ListView(padding: EdgeInsets.zero, children: [
+    return AnnotatedRegion<SystemUiOverlayStyle>(value: SystemUiOverlayStyle.light, child: ListView(padding: EdgeInsets.zero, children: [
       Container(
         color: Theme.of(context).appBarTheme.backgroundColor,
         padding: EdgeInsets.fromLTRB(16, top + 20, 16, 20),
@@ -236,14 +237,18 @@ class _SearchState extends State<SearchPage> {
                 for (final e in langs.entries)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: Text(e.value, style: const TextStyle(color: Colors.white)),
-                      selected: v == e.key,
-                      selectedColor: orange,
-                      backgroundColor: Colors.white12,
-                      side: BorderSide.none,
-                      showCheckmark: false,
-                      onSelected: (_) => lang.value = e.key,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(20),
+                      onTap: () => lang.value = e.key,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: v == e.key ? orange : Colors.transparent,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: v == e.key ? orange : Colors.white54),
+                        ),
+                        child: Text(e.value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                      ),
                     ),
                   ),
               ]),
@@ -308,7 +313,7 @@ class _SearchState extends State<SearchPage> {
             if (recent.isEmpty && wod == null) const Text('اكتب كلمة وابدأ. أي كلمة بتدوّر عليها بتتحفظ وتشتغل بعدها من غير نت.'),
           ]),
         ),
-    ]);
+    ]));
   }
 }
 
