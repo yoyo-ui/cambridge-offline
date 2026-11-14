@@ -130,6 +130,111 @@ Future<void> runPack(String lg, int n, bool audio) async {
   pk.ping();
 }
 
+Future<Map?> fetchStore(String lg, String w) async {
+  try {
+    final r = await http.get(Uri.parse('$api/$lg/${Uri.encodeComponent(w)}')).timeout(const Duration(seconds: 25));
+    final j = jsonDecode(utf8.decode(r.bodyBytes));
+    if (r.statusCode == 200 && j is Map && j['word'] != null) {
+      await db.insert('words', {'key': '$lg:$w', 'word': w, 'lang': lg, 'json': enc(j), 'ts': 0, 'fav': 0, 'seen': 0},
+          conflictAlgorithm: ConflictAlgorithm.ignore);
+      addVocab(w);
+      return j;
+    }
+  } catch (_) {}
+  return null;
+}
+
+String sizeText(num b) =>
+    b >= 1073741824 ? '${(b / 1073741824).toStringAsFixed(2)} GB' : '${(b / 1048576).toStringAsFixed(1)} MB';
+
+String timeText(double sec) {
+  final m = (sec / 60).round();
+  if (m < 1) return 'أقل من دقيقة';
+  if (m < 90) return '$m دقيقة';
+  return '${(m / 60).toStringAsFixed(1)} ساعة';
+}
+
+/// Samples ~30 words, estimates the compressed size + time, asks for confirmation, then downloads.
+Future<void> askAndRun(BuildContext context, String lg, int n, bool audio) async {
+  if (packs[lg]!.running) return;
+  final nav = Navigator.of(context, rootNavigator: true);
+  final msg = ScaffoldMessenger.of(context);
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const AlertDialog(
+        content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Expanded(child: Text('بنحسب الحجم...'))])),
+  );
+  final words = (await wordList(refresh: true)).take(n).toList();
+  final have = (await db.query('words', columns: ['word'], where: 'lang=?', whereArgs: [lg])).map((x) => x['word'] as String).toSet();
+  final cut = DateTime.now().subtract(const Duration(days: 30)).millisecondsSinceEpoch;
+  final miss = (await db.query('missing', columns: ['key'], where: 'ts>?', whereArgs: [cut])).map((x) => x['key'] as String).toSet();
+  final todo = words.where((w) => !have.contains(w) && !miss.contains('$lg:$w')).toList();
+  if (todo.isEmpty) {
+    nav.pop();
+    msg.showSnackBar(const SnackBar(content: Text('الكلمات دي كلها محمّلة')));
+    return;
+  }
+  final k = todo.length < 30 ? todo.length : 30;
+  final sample = [for (var i = 0; i < k; i++) todo[i * todo.length ~/ k]];
+  final t0 = DateTime.now();
+  var bytes = 0, found = 0, idx = 0;
+  final urls = <String>[];
+  Future<void> worker() async {
+    while (idx < sample.length) {
+      final j = await fetchStore(lg, sample[idx++]);
+      if (j == null) continue;
+      found++;
+      bytes += enc(j).length;
+      for (final x in (j['pronunciation'] as List? ?? [])) {
+        if (x is Map && x['url'] is String) urls.add(x['url']);
+      }
+    }
+  }
+
+  await Future.wait([worker(), worker(), worker()]);
+  final secPerWord = DateTime.now().difference(t0).inMilliseconds / 1000 / k;
+  if (found == 0) {
+    nav.pop();
+    msg.showSnackBar(const SnackBar(content: Text('مش قادر أوصل للسيرفر، اتأكد من النت وجرّب تاني')));
+    return;
+  }
+  final rate = found / k;
+  final est = bytes / found * rate * todo.length;
+  var audioLine = '';
+  if (audio && urls.isNotEmpty) {
+    var tot = 0, cnt = 0;
+    for (final u in urls.take(6)) {
+      try {
+        final r = await http.head(Uri.parse(u), headers: {'User-Agent': 'Mozilla/5.0'}).timeout(const Duration(seconds: 10));
+        final l = int.tryParse(r.headers['content-length'] ?? '');
+        if (l != null) {
+          tot += l;
+          cnt++;
+        }
+      } catch (_) {}
+    }
+    audioLine = cnt > 0
+        ? '\nالصوت: ~${sizeText(tot / cnt * (urls.length / found) * rate * todo.length)} (مش بيتضغط)'
+        : '\nالصوت: حجمه مش متاح قبل التحميل';
+  }
+  nav.pop();
+  if (!context.mounted) return;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (d) => AlertDialog(
+      title: const Text('تأكيد التحميل'),
+      content: Text('${langs[lg]}\n${todo.length} كلمة جديدة\n\nالحجم على الموبايل (مضغوط): ~${sizeText(est)}$audioLine'
+          '\nالوقت التقريبي: ~${timeText(secPerWord * todo.length)}\n\nالأرقام تقدير من عيّنة $k كلمة.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('إلغاء')),
+        FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('حمّل')),
+      ],
+    ),
+  );
+  if (ok == true) runPack(lg, n, audio);
+}
+
 Future<void> deletePack(String lg) async {
   packs[lg]!.stop = true;
   await db.delete('words', where: 'lang=? AND seen=0 AND fav=0', whereArgs: [lg]);
@@ -301,7 +406,7 @@ class _DlState extends State<DownloadsPage> {
           ] else
             Wrap(spacing: 8, children: [
               for (final n in [1000, 5000, 20000, 50000, 1000000])
-                OutlinedButton(onPressed: () => runPack(lg, n, audio), child: Text(n >= 1000000 ? 'الكل (177 ألف)' : '$n')),
+                OutlinedButton(onPressed: () => askAndRun(context, lg, n, audio), child: Text(n >= 1000000 ? 'الكل (177 ألف)' : '$n')),
             ]),
         ]),
       ),
