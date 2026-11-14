@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'extras.dart';
 
 const api = 'https://dictionary-api.eliaschen.dev/api/dictionary';
 const langs = {
@@ -24,10 +25,20 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dir = await getApplicationDocumentsDirectory();
   audioDir = Directory(p.join(dir.path, 'audio'))..createSync(recursive: true);
-  db = await openDatabase(p.join(dir.path, 'dict.db'), version: 1,
-      onCreate: (d, _) => d.execute(
-          'CREATE TABLE words(key TEXT PRIMARY KEY, word TEXT, lang TEXT, json TEXT, ts INTEGER, fav INTEGER DEFAULT 0)'));
+  db = await openDatabase(p.join(dir.path, 'dict.db'), version: 2,
+      onCreate: (d, _) async {
+        await d.execute(
+            'CREATE TABLE words(key TEXT PRIMARY KEY, word TEXT, lang TEXT, json TEXT, ts INTEGER, fav INTEGER DEFAULT 0, seen INTEGER DEFAULT 1)');
+        await d.execute(packsSql);
+      },
+      onUpgrade: (d, o, _) async {
+        if (o < 2) {
+          await d.execute('ALTER TABLE words ADD COLUMN seen INTEGER DEFAULT 1');
+          await d.execute(packsSql);
+        }
+      });
   runApp(const App());
+  startServices();
 }
 
 class Entry {
@@ -44,14 +55,14 @@ Future<Entry?> lookup(String lg, String q) async {
   final now = DateTime.now().millisecondsSinceEpoch;
   final rows = await db.query('words', where: 'key=?', whereArgs: [key]);
   if (rows.isNotEmpty) {
-    await db.update('words', {'ts': now}, where: 'key=?', whereArgs: [key]);
+    await db.update('words', {'ts': now, 'seen': 1}, where: 'key=?', whereArgs: [key]);
     return Entry(Map<String, dynamic>.from(jsonDecode(rows.first['json'] as String)), key, rows.first['fav'] == 1);
   }
   try {
     final r = await http.get(Uri.parse('$api/$lg/${Uri.encodeComponent(w)}')).timeout(const Duration(seconds: 15));
     final j = jsonDecode(utf8.decode(r.bodyBytes));
     if (r.statusCode == 200 && j is Map && j['word'] != null) {
-      await db.insert('words', {'key': key, 'word': w, 'lang': lg, 'json': jsonEncode(j), 'ts': now, 'fav': 0});
+      await db.insert('words', {'key': key, 'word': w, 'lang': lg, 'json': jsonEncode(j), 'ts': now, 'fav': 0, 'seen': 1});
       saveAudio(j);
       return Entry(Map<String, dynamic>.from(j), key, false);
     }
@@ -93,6 +104,7 @@ class App extends StatelessWidget {
   const App({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
+        navigatorKey: navKey,
         title: 'Cambridge Offline',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFF0B6E6E)),
@@ -111,8 +123,8 @@ class _HomeState extends State<Home> {
   int i = 0;
   @override
   Widget build(BuildContext context) {
-    const titles = ['', 'السجل', 'المفضلة'];
-    final pages = [const SearchPage(), const ListPage(false), const ListPage(true)];
+    const titles = ['', 'السجل', 'المفضلة', 'التحميلات'];
+    final pages = [const SearchPage(), const ListPage(false), const ListPage(true), const DownloadsPage()];
     return Scaffold(
       appBar: i == 0 ? null : AppBar(title: Text(titles[i])),
       body: SafeArea(child: pages[i]),
@@ -123,6 +135,7 @@ class _HomeState extends State<Home> {
           NavigationDestination(icon: Icon(Icons.search), label: 'بحث'),
           NavigationDestination(icon: Icon(Icons.history), label: 'السجل'),
           NavigationDestination(icon: Icon(Icons.star), label: 'المفضلة'),
+          NavigationDestination(icon: Icon(Icons.download), label: 'التحميلات'),
         ],
       ),
     );
@@ -196,7 +209,7 @@ class ListPage extends StatelessWidget {
   const ListPage(this.fav, {super.key});
   @override
   Widget build(BuildContext context) => FutureBuilder<List<Map<String, Object?>>>(
-        future: db.query('words', where: fav ? 'fav=1' : null, orderBy: 'ts DESC'),
+        future: db.query('words', where: fav ? 'fav=1' : 'seen=1', orderBy: 'ts DESC'),
         builder: (c, snap) {
           final rows = snap.data ?? [];
           if (rows.isEmpty) {

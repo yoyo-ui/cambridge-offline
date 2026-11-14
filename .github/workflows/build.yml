@@ -23,10 +23,14 @@ jobs:
           cp -r lib /tmp/lib && cp pubspec.yaml /tmp/pubspec.yaml
           flutter create --platforms=android --project-name cambridge_offline --org com.meda .
           cp -r /tmp/lib/. lib/ && cp /tmp/pubspec.yaml pubspec.yaml
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#android:label="[^"]*"#android:label="Cambridge Offline"#' android/app/src/main/AndroidManifest.xml
+      - name: Restore signing key
+        run: |
+          mkdir -p ~/.android
+          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > ~/.android/debug.keystore
       - run: flutter pub get
-      - run: flutter build apk --release
+      - run: flutter build apk --release --build-number=${{ github.run_number }}
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
